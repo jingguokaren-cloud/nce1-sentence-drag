@@ -1454,6 +1454,7 @@
     <div class="toast-container" id="toastContainer"></div>
 
     <!-- 引入课程数据 -->
+    <script src="https://static.cloudbase.net/cloudbase-js-sdk/3.4.2/cloudbase.full.js"></script>
     <script src="nce_lessons_data.js"></script>
 
     <script>
@@ -1467,11 +1468,14 @@
         let favoritesMode = false;
         let favoriteSentences = []; // 收藏夹模式下的句子列表
         let autoShowAnswer = false; // 连播阅读模式
+        let cloudSync = null;
+        let activeStorageKey = '';
+        let favoritesStorageKey = 'nce1_favorites';
+        let vocabStorageKey = 'nce1_vocab';
+        let audioPaddingStorageKey = 'nce1_audio_end_padding_by_lesson';
 
         const availableLessons = Object.keys(lessonsData).map(Number).sort((a, b) => a - b);
         const defaultAudioEndPadding = 0.3;
-        const audioPaddingStorageKey = 'nce1_audio_end_padding_by_lesson';
-
         function loadAudioPaddingSettings() {
             try {
                 return JSON.parse(localStorage.getItem(audioPaddingStorageKey) || '{}');
@@ -1499,6 +1503,7 @@
             const settings = loadAudioPaddingSettings();
             settings[currentLesson] = Number(value.toFixed(2));
             localStorage.setItem(audioPaddingStorageKey, JSON.stringify(settings));
+            if (cloudSync) cloudSync.queueSync();
             document.getElementById('audioPaddingValue').textContent = `${value.toFixed(2)}秒`;
             NCEAudio.cancel();
         }
@@ -1529,6 +1534,7 @@
             const select = document.getElementById('lessonSelect');
             currentLesson = parseInt(select.value);
             loadLesson(currentLesson);
+            if (cloudSync) cloudSync.queueSync();
         }
 
         // 加载课程
@@ -2748,14 +2754,15 @@
         // 获取收藏列表
         function getFavorites() {
             try {
-                return JSON.parse(localStorage.getItem('nce1_favorites') || '[]');
+                return JSON.parse(localStorage.getItem(favoritesStorageKey) || '[]');
             } catch { return []; }
         }
 
         // 保存收藏列表
         function saveFavorites(favs) {
-            localStorage.setItem('nce1_favorites', JSON.stringify(favs));
+            localStorage.setItem(favoritesStorageKey, JSON.stringify(favs));
             updateFavoritesBadge();
+            if (cloudSync) cloudSync.queueSync();
         }
 
         // 检查是否已收藏
@@ -3029,12 +3036,47 @@
 
         function getVocabWords() {
             try {
-                return JSON.parse(localStorage.getItem('nce1_vocab') || '[]');
+                return JSON.parse(localStorage.getItem(vocabStorageKey) || '[]');
             } catch { return []; }
         }
 
         function saveVocabWords(words) {
-            localStorage.setItem('nce1_vocab', JSON.stringify(words));
+            localStorage.setItem(vocabStorageKey, JSON.stringify(words));
+            if (cloudSync) cloudSync.queueSync();
+        }
+
+        function getCloudState() {
+            const snapshot = { lesson: currentLesson, index: currentIndex, favoritesMode, favorites: getFavorites(), vocab: getVocabWords(), audioPadding: loadAudioPaddingSettings(), updatedAt: Date.now() };
+            if (activeStorageKey) localStorage.setItem(activeStorageKey, JSON.stringify(snapshot));
+            return snapshot;
+        }
+        function applyCloudState(next = {}) {
+            currentLesson = Number(next.lesson) || currentLesson;
+            currentIndex = Math.max(0, Number(next.index) || 0);
+            favoritesMode = Boolean(next.favoritesMode);
+            localStorage.setItem(favoritesStorageKey, JSON.stringify(next.favorites || []));
+            localStorage.setItem(vocabStorageKey, JSON.stringify(next.vocab || []));
+            localStorage.setItem(audioPaddingStorageKey, JSON.stringify(next.audioPadding || {}));
+            initLessonSelector();
+            loadLesson(currentLesson);
+            updateFavoritesBadge();
+        }
+        function activateStudentStorage(identity) {
+            const key = String(identity.userId || identity.username || 'student').trim().toLowerCase().replace(/[^a-z0-9_.:-]/g, '-');
+            activeStorageKey = `nce1-sentence-drag-v1:${key}`;
+            favoritesStorageKey = `${activeStorageKey}:favorites`;
+            vocabStorageKey = `${activeStorageKey}:vocab`;
+            audioPaddingStorageKey = `${activeStorageKey}:audio-padding`;
+            let saved = {};
+            try { saved = JSON.parse(localStorage.getItem(activeStorageKey) || '{}'); } catch { saved = {}; }
+            applyCloudState(saved);
+        }
+        function deactivateStudentStorage() { activeStorageKey = ''; favoritesStorageKey = 'nce1_favorites'; vocabStorageKey = 'nce1_vocab'; audioPaddingStorageKey = 'nce1_audio_end_padding_by_lesson'; }
+        async function initializeCloudSync() {
+            try {
+                const { createCloudSync } = await import('./cloud-sync.js?v=20260804-cloudbase');
+                cloudSync = await createCloudSync({ appId: 'nce1-sentence-drag', storageKey: 'nce1-sentence-drag-v1', getState: getCloudState, applyState: applyCloudState, getSummary: () => ({ lesson: currentLesson, index: currentIndex, favorites: getFavorites().length, vocab: getVocabWords().length }), onAuthenticated: activateStudentStorage, onSignedOut: deactivateStudentStorage });
+            } catch (error) { console.error('CloudBase 初始化失败', error); }
         }
 
         function showVocabShelf() {
@@ -3071,6 +3113,7 @@
 
         // 启动
         init();
+        initializeCloudSync();
     </script>
 </body>
 
