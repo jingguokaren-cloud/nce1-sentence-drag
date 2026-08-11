@@ -1332,7 +1332,8 @@
                 <div class="word-pool" id="wordPool"></div>
 
                 <div class="buttons">
-                    <button class="btn-speak-sentence" onclick="speakCurrentSentence()">
+                    <button type="button" class="btn btn-speak-sentence" id="btnSpeakSentence"
+                        onclick="speakCurrentSentence()">
                         🔊 听句子
                     </button>
                     <button class="btn btn-check" onclick="checkAnswer()">✓ 检查答案</button>
@@ -1938,13 +1939,11 @@
             this.stopCurrentPlayback();
             this.pauseCachedAudio();
 
-            let audio = this.cache[lessonNum]?.audio || null;
-            let gesturePlayPromise = audio
-              ? this.startMutedPlayback(audio, currentPlayId)
-              : null;
-
-            const lessonData = await this.loadLesson(lessonNum);
-            if (this.playId !== currentPlayId) return 'cancelled';
+            let lessonData = this.cache[lessonNum] || null;
+            if (!lessonData) {
+              lessonData = await this.loadLesson(lessonNum);
+              if (this.playId !== currentPlayId) return 'cancelled';
+            }
             if (!lessonData) return 'unavailable';
             
             let match = lessonData.matchedSentences[text];
@@ -1974,39 +1973,43 @@
             
             if (!match) return 'unavailable';
             
-            audio = lessonData.audio;
-            if (!gesturePlayPromise) {
-              gesturePlayPromise = this.startMutedPlayback(audio, currentPlayId);
-            }
+            const audio = lessonData.audio;
             const actualStart = Math.max(0, match.start - this.startPaddingSeconds);
             const actualEnd = Math.max(
               actualStart,
               match.end - this.endGuardSeconds + getLessonAudioPadding(lessonNum)
             );
-            
-            const metadataReady = await this.waitForMetadata(audio);
-            
-            if (this.playId !== currentPlayId) return 'cancelled';
-            
-            if (!metadataReady) {
-              this.playId++;
-              audio.pause();
-              audio.volume = 1;
-              return 'unavailable';
-            }
 
-            
             try {
-              audio.currentTime = actualStart;
+              let playPromise;
+
+              if (audio.readyState >= 1) {
+                audio.pause();
+                audio.volume = 1;
+                audio.currentTime = actualStart;
+                playPromise = audio.play();
+              } else {
+                audio.volume = 0;
+                playPromise = audio.play();
+
+                const metadataReady = await this.waitForMetadata(audio);
+                if (this.playId !== currentPlayId) return 'cancelled';
+                if (!metadataReady) {
+                  this.playId++;
+                  audio.pause();
+                  audio.volume = 1;
+                  return 'unavailable';
+                }
+
+                audio.currentTime = actualStart;
+              }
+
               await this.waitForSeek(audio);
               if (this.playId !== currentPlayId) return 'cancelled';
 
-              const gesturePlaySucceeded = await gesturePlayPromise;
+              await playPromise;
               if (this.playId !== currentPlayId) return 'cancelled';
-
               audio.volume = 1;
-              if (!gesturePlaySucceeded) await audio.play();
-              if (this.playId !== currentPlayId) return 'cancelled';
               
               return new Promise((resolve) => {
                 const playback = {
@@ -2421,9 +2424,22 @@
         }
 
         // 播放当前句子
-        function speakCurrentSentence() {
+        let speakButtonRequestId = 0;
+
+        async function speakCurrentSentence() {
             const sentence = sentences[currentIndex].english;
-            return speakPhrase(sentence, true);
+            const requestId = ++speakButtonRequestId;
+            const button = document.getElementById('btnSpeakSentence');
+
+            if (button) button.textContent = '🔊 播放中…';
+
+            try {
+                return await speakPhrase(sentence, true);
+            } finally {
+                if (button && requestId === speakButtonRequestId) {
+                    button.textContent = '🔊 听句子';
+                }
+            }
         }
 
         // 一键复制句子进行AI讲解
