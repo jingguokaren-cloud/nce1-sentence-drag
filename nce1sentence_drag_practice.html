@@ -1455,7 +1455,6 @@
     <div class="toast-container" id="toastContainer"></div>
 
     <!-- 引入课程数据 -->
-    <script src="https://static.cloudbase.net/cloudbase-js-sdk/3.4.2/cloudbase.full.js"></script>
     <script src="nce_lessons_data.js"></script>
 
     <script>
@@ -1469,8 +1468,6 @@
         let favoritesMode = false;
         let favoriteSentences = []; // 收藏夹模式下的句子列表
         let autoShowAnswer = false; // 连播阅读模式
-        let cloudSync = null;
-        let activeStorageKey = '';
         let favoritesStorageKey = 'nce1_favorites';
         let vocabStorageKey = 'nce1_vocab';
         let audioPaddingStorageKey = 'nce1_audio_end_padding_by_lesson';
@@ -1504,7 +1501,7 @@
             const settings = loadAudioPaddingSettings();
             settings[currentLesson] = Number(value.toFixed(2));
             localStorage.setItem(audioPaddingStorageKey, JSON.stringify(settings));
-            if (cloudSync) cloudSync.queueSync();
+            saveProgress();
             document.getElementById('audioPaddingValue').textContent = `${value.toFixed(2)}秒`;
             NCEAudio.cancel();
         }
@@ -1535,7 +1532,7 @@
             const select = document.getElementById('lessonSelect');
             currentLesson = parseInt(select.value);
             loadLesson(currentLesson);
-            if (cloudSync) cloudSync.queueSync();
+            saveProgress();
         }
 
         // 加载课程
@@ -2778,7 +2775,7 @@
         function saveFavorites(favs) {
             localStorage.setItem(favoritesStorageKey, JSON.stringify(favs));
             updateFavoritesBadge();
-            if (cloudSync) cloudSync.queueSync();
+            saveProgress();
         }
 
         // 检查是否已收藏
@@ -3058,15 +3055,17 @@
 
         function saveVocabWords(words) {
             localStorage.setItem(vocabStorageKey, JSON.stringify(words));
-            if (cloudSync) cloudSync.queueSync();
+            saveProgress();
         }
 
-        function getCloudState() {
+        const progressStorageKey = "nce1-sentence-drag-v1";
+
+        function saveProgress() {
             const snapshot = { lesson: currentLesson, index: currentIndex, favoritesMode, favorites: getFavorites(), vocab: getVocabWords(), audioPadding: loadAudioPaddingSettings(), updatedAt: Date.now() };
-            if (activeStorageKey) localStorage.setItem(activeStorageKey, JSON.stringify(snapshot));
+            try { localStorage.setItem(progressStorageKey, JSON.stringify(snapshot)); } catch (error) { console.warn("本机进度保存失败", error); }
             return snapshot;
         }
-        function applyCloudState(next = {}) {
+        function applySavedProgress(next = {}) {
             currentLesson = Number(next.lesson) || currentLesson;
             currentIndex = Math.max(0, Number(next.index) || 0);
             favoritesMode = Boolean(next.favoritesMode);
@@ -3077,24 +3076,44 @@
             loadLesson(currentLesson);
             updateFavoritesBadge();
         }
-        function activateStudentStorage(identity) {
-            const key = String(identity.userId || identity.username || 'student').trim().toLowerCase().replace(/[^a-z0-9_.:-]/g, '-');
-            activeStorageKey = `nce1-sentence-drag-v1:${key}`;
-            favoritesStorageKey = `${activeStorageKey}:favorites`;
-            vocabStorageKey = `${activeStorageKey}:vocab`;
-            audioPaddingStorageKey = `${activeStorageKey}:audio-padding`;
-            let saved = {};
-            try { saved = JSON.parse(localStorage.getItem(activeStorageKey) || '{}'); } catch { saved = {}; }
-            applyCloudState(saved);
-        }
-        function deactivateStudentStorage() { activeStorageKey = ''; favoritesStorageKey = 'nce1_favorites'; vocabStorageKey = 'nce1_vocab'; audioPaddingStorageKey = 'nce1_audio_end_padding_by_lesson'; }
-        async function initializeCloudSync() {
+
+        function findLegacyProgressKey(prefix) {
+            let bestKey = "";
+            let bestAt = -1;
             try {
-                const { createCloudSync } = await import('./cloud-sync.js?v=20260804-cloudbase');
-                cloudSync = await createCloudSync({ appId: 'nce1-sentence-drag', storageKey: 'nce1-sentence-drag-v1', getState: getCloudState, applyState: applyCloudState, getSummary: () => ({ lesson: currentLesson, index: currentIndex, favorites: getFavorites().length, vocab: getVocabWords().length }), onAuthenticated: activateStudentStorage, onSignedOut: deactivateStudentStorage });
-            } catch (error) { console.error('CloudBase 初始化失败', error); }
+                for (let i = 0; i < localStorage.length; i += 1) {
+                    const key = localStorage.key(i) || "";
+                    if (key.indexOf(prefix + ":") !== 0) continue;
+                    if (key.endsWith(":favorites") || key.endsWith(":vocab") || key.endsWith(":audio-padding")) continue;
+                    let at = 0;
+                    try { at = Number(JSON.parse(localStorage.getItem(key) || "{}").updatedAt) || 0; } catch (error) { at = 0; }
+                    if (at > bestAt) { bestAt = at; bestKey = key; }
+                }
+            } catch (error) { bestKey = ""; }
+            return bestKey;
+        }
+        function copyLegacyValue(sourceKey, targetKey) {
+            try {
+                if (localStorage.getItem(targetKey) !== null) return;
+                const value = localStorage.getItem(sourceKey);
+                if (value !== null) localStorage.setItem(targetKey, value);
+            } catch (error) { /* 空间不足时忽略 */ }
         }
 
+        function loadSavedProgress() {
+            try {
+                const legacyKey = findLegacyProgressKey(progressStorageKey);
+                if (legacyKey && localStorage.getItem(progressStorageKey) === null) {
+                    localStorage.setItem(progressStorageKey, localStorage.getItem(legacyKey) || "{}");
+                    copyLegacyValue(legacyKey + ":favorites", favoritesStorageKey);
+                    copyLegacyValue(legacyKey + ":vocab", vocabStorageKey);
+                    copyLegacyValue(legacyKey + ":audio-padding", audioPaddingStorageKey);
+                }
+                return JSON.parse(localStorage.getItem(progressStorageKey) || "{}") || {};
+            } catch (error) {
+                return {};
+            }
+        }
         function showVocabShelf() {
             const words = getVocabWords();
             const body = document.getElementById('vocabShelfBody');
@@ -3128,8 +3147,9 @@
         }
 
         // 启动
+        const initialSavedProgress = loadSavedProgress();
         init();
-        initializeCloudSync();
+        applySavedProgress(initialSavedProgress);
     </script>
 </body>
 
